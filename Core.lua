@@ -1,5 +1,6 @@
 local ADDON_NAME, SR = ...
 local LDB = LibStub("LibDataBroker-1.1")
+local LibQTip = LibStub("LibQTip-1.0")
 local isKoKR = (GetLocale() == "koKR")
 local _GetMeta = C_AddOns and C_AddOns.GetAddOnMetadata or GetAddOnMetadata
 local VERSION = _GetMeta and _GetMeta(ADDON_NAME, "Version") or "unknown"
@@ -14,7 +15,6 @@ local DUNGEON_HEIGHT = 14
 local TITLE_HEIGHT = 24
 local PADDING = 10
 local CONTENT_WIDTH = FRAME_WIDTH - PADDING * 2
-local SESSION_WIDTH = 60
 
 local backdropTemplate = BackdropTemplateMixin and "BackdropTemplate" or nil
 local POPUP_BACKDROP = {
@@ -28,10 +28,6 @@ local BAR_HEIGHT = 3
 local defaults = {
     minimapPos = 180,
     popupPos = nil,
-    numberFormat = "percent",
-    showBars = true,
-    showSession = true,
-    showDungeons = true,
     collapsedCategories = {},
 }
 
@@ -40,13 +36,13 @@ local defaults = {
 -- ============================================================
 local sessionData = {}
 local sessionReady = false
-local popup, menuFrame
+local popup
 local allRows, usedRows = {}, 0
 local demoMode = false
 local demoData = {}
 
 -- Forward declarations
-local RefreshPopup, TogglePopup, OpenSettingsMenu, UpdateLDB
+local RefreshPopup, TogglePopup, UpdateLDB
 
 -- ============================================================
 -- Helpers
@@ -198,22 +194,6 @@ local function UpdateAllSessions()
 end
 
 -- ============================================================
--- Formatting
--- ============================================================
-local function FormatValue(repData)
-    if not repData or repData.standingID == 8 then return "" end
-    local fmt = SimpleRepuDB and SimpleRepuDB.numberFormat or "percent"
-    if fmt == "percent" then
-        return string.format("%1.1f%%", repData.percent * 100)
-    elseif fmt == "number" then
-        return string.format("%d/%d", repData.current, repData.maximum)
-    elseif fmt == "need" then
-        return string.format("%d %s", repData.maximum - repData.current, L("need", "필요"))
-    end
-    return ""
-end
-
--- ============================================================
 -- Row Pool
 -- ============================================================
 local function ReleaseAllRows()
@@ -223,7 +203,7 @@ local function ReleaseAllRows()
         allRows[i]:SetScript("OnMouseUp", nil)
         allRows[i]:SetScript("OnEnter", nil)
         allRows[i]:SetScript("OnLeave", nil)
-        allRows[i].sessionText:SetText("")
+        allRows[i].standingText:SetText("")
     end
     usedRows = 0
 end
@@ -269,18 +249,18 @@ local function AcquireRow(parent)
     row.leftText:SetJustifyH("LEFT")
     row.leftText:SetWordWrap(false)
 
-    -- Right text (standing + value, far right)
+    -- Right text (value, far right, fixed width)
     row.rightText = row:CreateFontString(nil, "OVERLAY")
     row.rightText:SetFontObject(GameTooltipText)
     row.rightText:SetPoint("RIGHT", -6, 0)
     row.rightText:SetJustifyH("RIGHT")
+    row.rightText:SetWidth(90)
 
-    -- Session text (fixed column, left of rightText)
-    row.sessionText = row:CreateFontString(nil, "OVERLAY")
-    row.sessionText:SetFontObject(GameTooltipText)
-    row.sessionText:SetPoint("RIGHT", row.rightText, "LEFT", -2, 0)
-    row.sessionText:SetJustifyH("RIGHT")
-    row.sessionText:SetWidth(SESSION_WIDTH)
+    -- Standing text (right-aligned, left of value)
+    row.standingText = row:CreateFontString(nil, "OVERLAY")
+    row.standingText:SetFontObject(GameTooltipText)
+    row.standingText:SetPoint("RIGHT", row.rightText, "LEFT", -10, 0)
+    row.standingText:SetJustifyH("LEFT")
 
     allRows[usedRows] = row
     return row
@@ -298,6 +278,7 @@ local function SetupHeader(row, cat, isCollapsed)
     row.leftText:SetText(arrow .. L(cat.en, cat.kr) .. "|r")
     row.leftText:SetWidth(CONTENT_WIDTH)
     row.rightText:SetText("")
+    row.standingText:SetText("")
     row:SetScript("OnMouseUp", function()
         SimpleRepuDB.collapsedCategories[cat.key] = not SimpleRepuDB.collapsedCategories[cat.key] or nil
         RefreshPopup()
@@ -322,30 +303,22 @@ local function SetupFaction(row, faction, repData)
         local standing = GetStandingLabel(repData.standingID)
         local r, g, b = GetStandingColor(repData.standingID)
 
-        -- Session diff (fixed left column) + Standing + value (right)
-        if SimpleRepuDB.showSession then
-            local diff = GetSessionDiff(faction.id)
-            if diff then
-                if diff > 0 then
-                    row.sessionText:SetText("|cff44ff44+" .. diff .. "|r")
-                else
-                    row.sessionText:SetText("|cffff4444" .. diff .. "|r")
-                end
-            end
-        end
-
-        local standingHex = string.format("|cff%02x%02x%02x", r * 255, g * 255, b * 255)
-        local leftStr = factionName .. " " .. standingHex .. "(" .. standing .. ")|r"
-        row.leftText:SetText(leftStr)
+        row.leftText:SetText(factionName)
+        row.standingText:SetText("|cffaaaaaa" .. standing .. "|r")
 
         if repData.standingID == 8 then
             row.rightText:SetText("")
         else
-            row.rightText:SetText(string.format("%d/%d", repData.current, repData.maximum))
+            local diff = GetSessionDiff(faction.id)
+            if diff and diff > 0 then
+                row.rightText:SetText(string.format("|cff44ff44%d|r / %d", repData.current, repData.maximum))
+            else
+                row.rightText:SetText(string.format("%d / %d", repData.current, repData.maximum))
+            end
         end
 
         -- Progress bar (thin gauge at bottom)
-        if SimpleRepuDB.showBars and repData.standingID < 8 then
+        if repData.standingID < 8 then
             row.barBg:Show()
             row.barFill:Show()
             ApplyColor(row.barBg, 0.25, 0.25, 0.25, 0.8)
@@ -358,11 +331,19 @@ local function SetupFaction(row, faction, repData)
 
         -- Hover tooltip
         if repData.standingID < 8 then
+            local factionID = faction.id
             row:SetScript("OnEnter", function(self)
                 GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
                 GameTooltip:AddLine(repData.name, 1, 1, 1)
                 local need = repData.maximum - repData.current
                 GameTooltip:AddDoubleLine(L("Need for next standing", "다음 평판까지 필요"), tostring(need), 0.7, 0.7, 0.7, 1, 1, 1)
+                local diff = GetSessionDiff(factionID)
+                if diff then
+                    local prefix = diff > 0 and "+" or ""
+                    local cr, cg, cb = 0.27, 1, 0.27
+                    if diff < 0 then cr, cg, cb = 1, 0.27, 0.27 end
+                    GameTooltip:AddDoubleLine(L("Gained", "획득"), prefix .. diff, 0.7, 0.7, 0.7, cr, cg, cb)
+                end
                 GameTooltip:Show()
             end)
             row:SetScript("OnLeave", function() GameTooltip:Hide() end)
@@ -372,6 +353,7 @@ local function SetupFaction(row, faction, repData)
         end
     else
         row.leftText:SetText(factionName)
+        row.standingText:SetText("")
         row.rightText:SetText("|cff808080" .. L("Not discovered", "미발견") .. "|r")
         row.barBg:Hide()
         row.barFill:Hide()
@@ -384,24 +366,20 @@ local function SetupSubInfo(row, faction)
     row:SetHeight(DUNGEON_HEIGHT)
     row.barBg:Hide()
     row.barFill:Hide()
+    row.standingText:SetText("")
 
     local parts = {}
     for _, d in ipairs(faction.dungeons) do
-        local color = d.raid and "|cffff6666" or "|cffbbbbbb"
-        table.insert(parts, color .. L(d.en, d.kr) .. "|r")
+        table.insert(parts, L(d.en, d.kr))
     end
     if faction.items then
         for _, item in ipairs(faction.items) do
-            table.insert(parts, "|cffbbbbbb" .. L(item.en, item.kr) .. "|r")
+            table.insert(parts, L(item.en, item.kr))
         end
     end
 
-    local zoneStr = ""
-    if faction.zone then
-        zoneStr = "|cff666666(" .. L(faction.zone.en, faction.zone.kr) .. ")|r "
-    end
     row.leftText:SetFontObject(GameFontDisableSmall)
-    row.leftText:SetText("    " .. zoneStr .. table.concat(parts, ", "))
+    row.leftText:SetText("    |cff888888" .. table.concat(parts, ", ") .. "|r")
     row.leftText:SetWidth(CONTENT_WIDTH - 12)
     row.rightText:SetText("")
 end
@@ -464,13 +442,6 @@ local function CreatePopup()
     f.titleBar:SetScript("OnDragStart", function() f:StartMoving() end)
     f.titleBar:SetScript("OnDragStop", function() SavePopupPos(f) end)
 
-    -- Right-click for settings
-    f:SetScript("OnMouseUp", function(self, button)
-        if button == "RightButton" then
-            OpenSettingsMenu(self)
-        end
-    end)
-
     -- ESC to close
     tinsert(UISpecialFrames, "SimpleRepuPopup")
 
@@ -521,7 +492,7 @@ RefreshPopup = function()
 
                         -- Dungeon / item sub-row
                         local hasSubInfo = #faction.dungeons > 0 or (faction.items and #faction.items > 0)
-                        if SimpleRepuDB.showDungeons and repData and repData.standingID < 8 and hasSubInfo then
+                        if repData and repData.standingID < 8 and hasSubInfo then
                             local dRow = AcquireRow(popup)
                             SetupSubInfo(dRow, faction)
                             dRow:SetPoint("TOPLEFT", popup, "TOPLEFT", PADDING, yOffset)
@@ -576,105 +547,77 @@ TogglePopup = function()
 end
 
 -- ============================================================
--- Settings Menu (UIDropDownMenu — EasyMenu not available in BCC)
+-- Tooltip (LibQTip — minimap / LDB hover)
 -- ============================================================
-OpenSettingsMenu = function(anchor)
-    if not menuFrame then
-        menuFrame = CreateFrame("Frame", "SimpleRepuMenuFrame", UIParent, "UIDropDownMenuTemplate")
+local activeTooltip = nil
+local subTooltip = nil
+
+local function GetSubTooltip()
+    if not subTooltip then
+        subTooltip = CreateFrame("GameTooltip", "SimpleRepuSubTooltip", UIParent, "GameTooltipTemplate")
+        subTooltip:SetFrameStrata("TOOLTIP")
     end
-
-    UIDropDownMenu_Initialize(menuFrame, function(self, level)
-        level = level or 1
-        local info
-
-        -- Number Format header
-        info = UIDropDownMenu_CreateInfo()
-        info.text = L("Number Format", "숫자 형식")
-        info.isTitle = true
-        info.notCheckable = true
-        UIDropDownMenu_AddButton(info, level)
-
-        -- Percent
-        info = UIDropDownMenu_CreateInfo()
-        info.text = L("Percent", "퍼센트") .. "  (65.3%)"
-        info.checked = (SimpleRepuDB.numberFormat == "percent")
-        info.func = function() SimpleRepuDB.numberFormat = "percent"; CloseDropDownMenus(); RefreshPopup() end
-        UIDropDownMenu_AddButton(info, level)
-
-        -- Value
-        info = UIDropDownMenu_CreateInfo()
-        info.text = L("Value", "수치") .. "  (3210/6000)"
-        info.checked = (SimpleRepuDB.numberFormat == "number")
-        info.func = function() SimpleRepuDB.numberFormat = "number"; CloseDropDownMenus(); RefreshPopup() end
-        UIDropDownMenu_AddButton(info, level)
-
-        -- Need
-        info = UIDropDownMenu_CreateInfo()
-        info.text = L("Need", "필요량") .. "  (2790 " .. L("need", "필요") .. ")"
-        info.checked = (SimpleRepuDB.numberFormat == "need")
-        info.func = function() SimpleRepuDB.numberFormat = "need"; CloseDropDownMenus(); RefreshPopup() end
-        UIDropDownMenu_AddButton(info, level)
-
-        -- Separator
-        info = UIDropDownMenu_CreateInfo()
-        info.text = ""
-        info.isTitle = true
-        info.notCheckable = true
-        UIDropDownMenu_AddButton(info, level)
-
-        -- Show Progress Bars
-        info = UIDropDownMenu_CreateInfo()
-        info.text = L("Show Progress Bars", "진행 바 표시")
-        info.checked = SimpleRepuDB.showBars
-        info.isNotRadio = true
-        info.keepShownOnClick = true
-        info.func = function() SimpleRepuDB.showBars = not SimpleRepuDB.showBars; RefreshPopup() end
-        UIDropDownMenu_AddButton(info, level)
-
-        -- Show Session Changes
-        info = UIDropDownMenu_CreateInfo()
-        info.text = L("Show Session Changes", "세션 변화 표시")
-        info.checked = SimpleRepuDB.showSession
-        info.isNotRadio = true
-        info.keepShownOnClick = true
-        info.func = function() SimpleRepuDB.showSession = not SimpleRepuDB.showSession; RefreshPopup() end
-        UIDropDownMenu_AddButton(info, level)
-
-        -- Show Dungeons
-        info = UIDropDownMenu_CreateInfo()
-        info.text = L("Show Dungeons", "던전 표시")
-        info.checked = SimpleRepuDB.showDungeons
-        info.isNotRadio = true
-        info.keepShownOnClick = true
-        info.func = function() SimpleRepuDB.showDungeons = not SimpleRepuDB.showDungeons; RefreshPopup() end
-        UIDropDownMenu_AddButton(info, level)
-
-        -- Separator
-        info = UIDropDownMenu_CreateInfo()
-        info.text = ""
-        info.isTitle = true
-        info.notCheckable = true
-        UIDropDownMenu_AddButton(info, level)
-
-        -- Reset Session
-        info = UIDropDownMenu_CreateInfo()
-        info.text = L("Reset Session", "세션 초기화")
-        info.notCheckable = true
-        info.func = ResetSession
-        UIDropDownMenu_AddButton(info, level)
-    end, "MENU")
-
-    ToggleDropDownMenu(1, nil, menuFrame, anchor, 0, 0)
+    return subTooltip
 end
 
--- ============================================================
--- Tooltip (minimap / LDB hover)
--- ============================================================
-local tooltipLineMap = {} -- [lineNum] = { faction, repData }
+local function HideTooltip()
+    if subTooltip then subTooltip:Hide() end
+    if activeTooltip then
+        LibQTip:Release(activeTooltip)
+        activeTooltip = nil
+    end
+end
 
-local function ShowRepTooltip(tooltip)
-    wipe(tooltipLineMap)
-    tooltip:AddLine(" ")
+local function OnLineEnter(self, data)
+    local faction = data.faction
+    local repData = data.repData
+    if not faction then return end
+
+    local st = GetSubTooltip()
+    st:SetOwner(activeTooltip, "ANCHOR_NONE")
+    st:ClearAllPoints()
+    st:SetPoint("TOPLEFT", activeTooltip, "TOPRIGHT", 4, 0)
+
+    local name = repData and repData.name or faction.name_en
+    st:AddLine(name, 1, 1, 1)
+
+    if repData and repData.standingID < 8 then
+        local need = repData.maximum - repData.current
+        st:AddDoubleLine(L("Need for next standing", "다음 평판까지 필요"), tostring(need), 0.7, 0.7, 0.7, 1, 1, 1)
+    end
+
+    local diff = GetSessionDiff(faction.id)
+    if diff then
+        local prefix = diff > 0 and "+" or ""
+        local cr, cg, cb = 0.27, 1, 0.27
+        if diff < 0 then cr, cg, cb = 1, 0.27, 0.27 end
+        st:AddDoubleLine(L("Gained", "획득"), prefix .. diff, 0.7, 0.7, 0.7, cr, cg, cb)
+    end
+
+    if #faction.dungeons > 0 then
+        st:AddLine(" ")
+        for _, d in ipairs(faction.dungeons) do
+            local dr, dg, db = 1, 1, 1
+            if d.raid then dr, dg, db = 1, 0.4, 0.4 end
+            st:AddLine("  " .. L(d.en, d.kr), dr, dg, db)
+        end
+    end
+
+    st:Show()
+end
+
+local function OnLineLeave()
+    if subTooltip then subTooltip:Hide() end
+end
+
+local function ShowQTip(anchor)
+    HideTooltip()
+
+    local tt = LibQTip:Acquire("SimpleRepuTooltip", 3, "LEFT", "LEFT", "RIGHT")
+    activeTooltip = tt
+
+    tt:AddHeader("|cff00ccff" .. L("Simple Repu", "평판 가이드") .. " v" .. VERSION .. "|r")
+    tt:AddSeparator()
 
     for _, cat in ipairs(SR.CATEGORIES) do
         local hasRelevant = false
@@ -686,7 +629,10 @@ local function ShowRepTooltip(tooltip)
         end
 
         if hasRelevant then
-            tooltip:AddLine(L(cat.en, cat.kr), 1, 0.82, 0)
+            tt:AddLine(" ")
+            local line = tt:AddLine()
+            tt:SetCell(line, 1, "|cffd4a017" .. L(cat.en, cat.kr) .. "|r", nil, "LEFT", 3)
+
             for _, faction in ipairs(SR.FACTIONS) do
                 if faction.category == cat.key and IsFactionRelevant(faction) then
                     local repData = GetFactionData(faction.id)
@@ -695,182 +641,43 @@ local function ShowRepTooltip(tooltip)
                     if repData then
                         local standing = GetStandingLabel(repData.standingID)
                         local r, g, b = GetStandingColor(repData.standingID)
+                        local standingHex = string.format("|cff%02x%02x%02x", r*255, g*255, b*255)
 
-                        local sessionStr = ""
-                        local diff = GetSessionDiff(faction.id)
-                        if diff and SimpleRepuDB.showSession then
-                            local prefix = diff > 0 and "|cff44ff44+" or "|cffff4444"
-                            sessionStr = "  " .. prefix .. diff .. "|r"
+                        local valueStr = ""
+                        if repData.standingID < 8 then
+                            local diff = GetSessionDiff(faction.id)
+                            if diff and diff > 0 then
+                                valueStr = string.format("|cff44ff44%d|r / %d", repData.current, repData.maximum)
+                            else
+                                valueStr = string.format("%d / %d", repData.current, repData.maximum)
+                            end
                         end
 
-                        local valueStr
-                        if repData.standingID == 8 then
-                            valueStr = standing
-                        else
-                            valueStr = string.format("%d/%d", repData.current, repData.maximum)
-                        end
-
-                        local leftStr = string.format("  %s |cff%02x%02x%02x(%s)|r", factionName, r*255, g*255, b*255, standing)
-                        tooltip:AddDoubleLine(leftStr, sessionStr .. "  " .. valueStr, 1, 1, 1, 1, 1, 1)
+                        line = tt:AddLine(
+                            "  " .. factionName,
+                            standingHex .. standing .. "|r",
+                            valueStr
+                        )
                     else
-                        tooltip:AddDoubleLine("  " .. factionName, L("Not discovered", "미발견"), 0.5, 0.5, 0.5, 0.5, 0.5, 0.5)
+                        line = tt:AddLine(
+                            "  |cff808080" .. factionName .. "|r",
+                            "",
+                            "|cff808080" .. L("Not discovered", "미발견") .. "|r"
+                        )
                     end
 
-                    -- Track which tooltip line maps to this faction
-                    tooltipLineMap[tooltip:NumLines()] = { faction = faction, repData = repData }
+                    tt:SetLineScript(line, "OnEnter", OnLineEnter, { faction = faction, repData = repData })
+                    tt:SetLineScript(line, "OnLeave", OnLineLeave)
                 end
             end
         end
     end
 
-end
-
--- ============================================================
--- Sub-tooltip (dungeon detail on faction hover)
--- ============================================================
-local subTooltip = nil
-local overlayPool = {}
-local usedOverlays = 0
-
-local function GetSubTooltip()
-    if not subTooltip then
-        subTooltip = CreateFrame("GameTooltip", "SimpleRepuSubTooltip", UIParent, "GameTooltipTemplate")
-        subTooltip:SetFrameStrata("TOOLTIP")
-    end
-    return subTooltip
-end
-
-local function ReleaseOverlays()
-    for i = 1, usedOverlays do
-        overlayPool[i]:Hide()
-        overlayPool[i]:ClearAllPoints()
-    end
-    usedOverlays = 0
-    if subTooltip then subTooltip:Hide() end
-end
-
-local function AttachTooltipOverlays()
-    ReleaseOverlays()
-
-    for lineNum, data in pairs(tooltipLineMap) do
-        local leftLine = _G["GameTooltipTextLeft" .. lineNum]
-        local rightLine = _G["GameTooltipTextRight" .. lineNum]
-        if leftLine and leftLine:IsShown() then
-            usedOverlays = usedOverlays + 1
-            local ov = overlayPool[usedOverlays]
-            if not ov then
-                ov = CreateFrame("Frame", nil, GameTooltip)
-                ov:EnableMouse(true)
-                ov:SetFrameLevel(GameTooltip:GetFrameLevel() + 10)
-                overlayPool[usedOverlays] = ov
-            else
-                ov:SetParent(GameTooltip)
-            end
-
-            ov:ClearAllPoints()
-            ov:SetPoint("TOPLEFT", leftLine, "TOPLEFT", -4, 2)
-            if rightLine and rightLine:IsShown() and rightLine:GetText() then
-                ov:SetPoint("BOTTOMRIGHT", rightLine, "BOTTOMRIGHT", 4, -2)
-            else
-                ov:SetPoint("BOTTOMRIGHT", leftLine, "BOTTOMRIGHT", 4, -2)
-            end
-
-            -- Highlight texture
-            if not ov.highlight then
-                ov.highlight = ov:CreateTexture(nil, "BACKGROUND")
-                ov.highlight:SetAllPoints()
-                ApplyColor(ov.highlight, 1, 1, 1, 0.1)
-                ov.highlight:Hide()
-            end
-
-            ov.data = data
-            ov:SetScript("OnEnter", function(self)
-                self.highlight:Show()
-                local faction = self.data.faction
-                local repData = self.data.repData
-
-                local st = GetSubTooltip()
-                st:SetOwner(GameTooltip, "ANCHOR_NONE")
-                st:ClearAllPoints()
-                st:SetPoint("TOPLEFT", GameTooltip, "TOPRIGHT", 4, 0)
-
-                local name = repData and repData.name or faction.name_en
-                st:AddLine(name, 1, 1, 1)
-
-                if repData and repData.standingID < 8 then
-                    local need = repData.maximum - repData.current
-                    st:AddDoubleLine(L("Need for next standing", "다음 평판까지 필요"), tostring(need), 0.7, 0.7, 0.7, 1, 1, 1)
-                end
-
-                if #faction.dungeons > 0 then
-                    st:AddLine(" ")
-                    for _, d in ipairs(faction.dungeons) do
-                        local dr, dg, db = 1, 1, 1
-                        if d.raid then dr, dg, db = 1, 0.4, 0.4 end
-                        st:AddLine("  " .. L(d.en, d.kr), dr, dg, db)
-                    end
-                end
-
-                st:Show()
-            end)
-
-            ov:SetScript("OnLeave", function(self)
-                self.highlight:Hide()
-                if subTooltip then subTooltip:Hide() end
-            end)
-
-            ov:Show()
-        end
-    end
-end
-
--- ============================================================
--- Sticky Tooltip (stays visible when mouse moves onto it)
--- ============================================================
-local stickyAnchor = nil
-local stickyWatcher = CreateFrame("Frame")
-stickyWatcher:Hide()
-
-stickyWatcher:SetScript("OnUpdate", function(self, elapsed)
-    self.elapsed = (self.elapsed or 0) + elapsed
-    if self.elapsed < 0.1 then return end
-    self.elapsed = 0
-    if not GameTooltip:IsShown() then
-        self:Hide()
-        return
-    end
-    local overTip = MouseIsOver(GameTooltip)
-    local overAnchor = stickyAnchor and stickyAnchor:IsVisible() and MouseIsOver(stickyAnchor)
-    local overSub = subTooltip and subTooltip:IsShown() and MouseIsOver(subTooltip)
-    if not overTip and not overAnchor and not overSub then
-        ReleaseOverlays()
-        GameTooltip:EnableMouse(false)
-        GameTooltip:Hide()
-        stickyAnchor = nil
-        self:Hide()
-    end
-end)
-
-local function ShowStickyTooltip(anchor)
-    stickyWatcher:Hide()
-    stickyAnchor = anchor
-    GameTooltip:SetOwner(anchor, "ANCHOR_NONE")
-    -- Smart anchor: tooltip goes below if anchor is in upper half, above otherwise
-    local _, ay = anchor:GetCenter()
-    if ay and ay > UIParent:GetHeight() / 2 then
-        GameTooltip:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT")
-    else
-        GameTooltip:SetPoint("BOTTOMLEFT", anchor, "TOPLEFT")
-    end
-    ShowRepTooltip(GameTooltip)
-    GameTooltip:EnableMouse(true)
-    GameTooltip:Show()
-    AttachTooltipOverlays()
-end
-
-local function HideStickyTooltip()
-    stickyWatcher.elapsed = 0
-    stickyWatcher:Show()
+    tt:SetAutoHideDelay(0.25, anchor, function()
+        if subTooltip then subTooltip:Hide() end
+    end)
+    tt:SmartAnchorTo(anchor)
+    tt:Show()
 end
 
 -- ============================================================
@@ -886,16 +693,14 @@ local dataObj = LDB:NewDataObject("SimpleRepu", {
     label = L("Simple Repu", "평판 가이드"),
     icon = "Interface\\Icons\\Achievement_Reputation_01",
     OnEnter = function(self)
-        ShowStickyTooltip(self)
+        ShowQTip(self)
     end,
     OnLeave = function(self)
-        HideStickyTooltip()
+        -- LibQTip handles auto-hide
     end,
     OnClick = function(self, button)
         if button == "LeftButton" then
             TogglePopup()
-        elseif button == "RightButton" then
-            OpenSettingsMenu(self)
         end
     end,
 })
@@ -934,8 +739,6 @@ eventFrame:SetScript("OnEvent", function(self, event, arg1)
             if msg == "reset" then
                 ResetSession()
                 print("|cff00ccff[SimpleRepu]|r " .. L("Session reset.", "세션이 초기화되었습니다."))
-            elseif msg == "config" or msg == "options" then
-                OpenSettingsMenu("cursor")
             elseif msg == "demo" then
                 demoMode = not demoMode
                 if demoMode then
@@ -992,23 +795,17 @@ eventFrame:SetScript("OnEvent", function(self, event, arg1)
         UpdateMinimapPos()
 
         minimapBtn:RegisterForDrag("RightButton")
-        minimapBtn:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+        minimapBtn:RegisterForClicks("LeftButtonUp")
 
-        minimapBtn:SetScript("OnClick", function(self, button)
-            if button == "LeftButton" then
-                TogglePopup()
-            elseif button == "RightButton" then
-                OpenSettingsMenu(self)
-            end
+        minimapBtn:SetScript("OnClick", function()
+            TogglePopup()
         end)
 
         minimapBtn:SetScript("OnEnter", function(btn)
-            GameTooltip:SetOwner(btn, "ANCHOR_LEFT")
-            GameTooltip:AddLine("Simple Repu v" .. VERSION, 1, 0.82, 0)
-            GameTooltip:Show()
+            ShowQTip(btn)
         end)
         minimapBtn:SetScript("OnLeave", function()
-            GameTooltip:Hide()
+            -- LibQTip handles auto-hide
         end)
 
         minimapBtn:SetScript("OnDragStart", function(btn)

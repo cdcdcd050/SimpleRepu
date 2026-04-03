@@ -4,13 +4,14 @@
 ## Title-koKR: SimpleRepu (평판 가이드)
 ## Notes-koKR: 간단한 TBC 평판 가이드
 ## Author: CH00
-## Version: 2.2.0
+## Version: 2.3.0
 ## SavedVariables: SimpleRepuDB
 ## OptionalDeps: Arcana
 
 libs\LibStub\LibStub.lua
 libs\CallbackHandler-1.0.lua
 libs\LibDataBroker-1.1\LibDataBroker-1.1.lua
+libs\LibQTip-1.0\LibQTip-1.0.lua
 
 Data.lua
 Core.lua
