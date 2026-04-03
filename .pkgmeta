@@ -1,0 +1,6 @@
+package-as: SimpleRepu
+
+ignore:
+  - "*.zip"
+  - .gitignore
+  - .github
