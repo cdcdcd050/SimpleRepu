@@ -39,6 +39,7 @@ local defaults = {
 -- State
 -- ============================================================
 local sessionData = {}
+local sessionReady = false
 local popup, menuFrame
 local allRows, usedRows = {}, 0
 local demoMode = false
@@ -139,15 +140,29 @@ local function ApplyColor(tex, r, g, b, a)
 end
 
 -- ============================================================
--- Session Tracking
+-- Session Tracking (relative value based, like Broker_Everything)
 -- ============================================================
 local function UpdateSession(factionID, repData)
-    if not repData then return end
+    if not repData or not sessionReady then return end
     local s = sessionData[factionID]
     if not s then
-        sessionData[factionID] = { startValue = repData.barValue, diff = 0 }
+        sessionData[factionID] = {
+            standingID = repData.standingID,
+            value = repData.current,
+            max = repData.maximum,
+            diff = 0,
+        }
     else
-        s.diff = repData.barValue - s.startValue
+        -- Handle standing change: adjust baseline for new standing range
+        if s.standingID ~= repData.standingID then
+            s.standingID = repData.standingID
+            s.value = repData.current - s.max
+            s.max = repData.maximum
+        end
+        -- Only update diff when value actually changed
+        if repData.current ~= s.value then
+            s.diff = repData.current - s.value
+        end
     end
 end
 
@@ -158,7 +173,7 @@ end
 
 local function ResetSession()
     wipe(sessionData)
-    -- Re-initialize baselines
+    -- Re-initialize baselines with current values
     for _, faction in ipairs(SR.FACTIONS) do
         if IsFactionRelevant(faction) then
             local repData = GetFactionData(faction.id)
@@ -906,9 +921,8 @@ eventFrame:SetScript("OnEvent", function(self, event, arg1)
             SimpleRepuDB.collapsedCategories = {}
         end
 
-        -- Initialize session baselines
-        UpdateAllSessions()
-
+        -- Delay session init until faction data is stable
+        self:RegisterEvent("PLAYER_ENTERING_WORLD")
         -- Register UPDATE_FACTION for real-time updates
         self:RegisterEvent("UPDATE_FACTION")
 
@@ -928,9 +942,9 @@ eventFrame:SetScript("OnEvent", function(self, event, arg1)
                     GenerateDemoData()
                     wipe(sessionData)
                     -- Fake session diffs for demo
-                    sessionData[942]  = { startValue = 15600 - 350, diff = 350 }
-                    sessionData[967]  = { startValue = 18200 - 120, diff = 120 }
-                    sessionData[1011] = { startValue = 2100 - 75,   diff = 75 }
+                    sessionData[942]  = { standingID = 7, value = 15600 - 350, max = 21000, diff = 350 }
+                    sessionData[967]  = { standingID = 7, value = 18200 - 120, max = 21000, diff = 120 }
+                    sessionData[1011] = { standingID = 5, value = 2100 - 75,   max = 6000,  diff = 75 }
                     print("|cff00ccff[SimpleRepu]|r " .. L("Demo mode ON", "데모 모드 켜짐"))
                 else
                     wipe(demoData)
@@ -1012,6 +1026,12 @@ eventFrame:SetScript("OnEvent", function(self, event, arg1)
         end)
 
         self:UnregisterEvent("ADDON_LOADED")
+
+    elseif event == "PLAYER_ENTERING_WORLD" then
+        -- Faction data is now stable; initialize session baselines
+        sessionReady = true
+        UpdateAllSessions()
+        self:UnregisterEvent("PLAYER_ENTERING_WORLD")
 
     elseif event == "UPDATE_FACTION" then
         UpdateAllSessions()
