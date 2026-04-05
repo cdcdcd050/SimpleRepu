@@ -1,6 +1,7 @@
 package-as: SimpleRepu
 
 ignore:
+  - CLAUDE.md
   - "*.zip"
   - .gitignore
   - .github
